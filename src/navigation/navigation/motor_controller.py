@@ -26,6 +26,10 @@ class MotorControllerNode(Node):
             self.set_motor_speeds,
             10)
 
+        # Rate limiting: track last I2C write time, enforce 10 Hz max
+        self.min_write_interval = 0.1  # 10 Hz
+        self.last_write_time = 0.0
+
         # Subscription to emergency stop topic
         # If emergency stop is triggered, the node will be destroyed and both motors will be stopped
         self.emergency_stop = self.create_subscription(
@@ -61,13 +65,26 @@ class MotorControllerNode(Node):
 
     # Send the scaled speed values to the motor controller via I2C
     # Input: [int] left_value, [int] right_value in range [-100, 100]
+    # Rate limited to 10 Hz max, with 2 retries on failure and 5ms post-write delay
     def send_value(self, left_value, right_value):
+        # Rate limit: skip if called faster than 10 Hz
+        now = time.monotonic()
+        if now - self.last_write_time < self.min_write_interval:
+            return
+        self.last_write_time = now
+
         byte_list = [self.to_byte(left_value), self.to_byte(right_value)]
-        try:
-            # Write two signed bytes: [left_speed, right_speed]
-            self.bus.write_i2c_block_data(self.I2C_address, 0, byte_list)
-        except Exception as e:
-            self.get_logger().info(f"Failed to send value: {e}")
+        for attempt in range(3):
+            try:
+                # Write two signed bytes: [left_speed, right_speed]
+                self.bus.write_i2c_block_data(self.I2C_address, 0, byte_list)
+                time.sleep(0.005)  # 5ms delay after successful write
+                return
+            except Exception as e:
+                if attempt < 2:
+                    time.sleep(0.01)  # 10ms delay before retry
+                else:
+                    self.get_logger().info(f"I2C write failed after 3 attempts: {e}")
 
     # Stop the motors by sending zero speed to both
     def stop_motors(self):

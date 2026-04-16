@@ -3,23 +3,29 @@ from rclpy.node import Node
 from std_msgs.msg import Bool, Float32MultiArray
 import time
 
-# Obstacle-avoidance arbiter between waypoint_nav and motor_controller.
-# Normally passes waypoint_nav motor commands straight through. When the
-# camera reports an obstacle in the boat's path, it overrides with a
-# timed stop followed by a gentle right turn until the obstacle clears.
+# Obstacle-avoidance override for waypoint_nav. Shares the 'set_motor_speeds'
+# topic with waypoint_nav: when the camera reports an obstacle in the boat's
+# path, this node publishes override commands (stop for STOP_DURATION_S, then
+# a gentle right turn until the obstacle clears). While clear it publishes
+# nothing, so waypoint_nav's commands reach motor_controller unmodified.
+# Arbitration is last-write-wins on the shared topic — obstacle_avoidance
+# ticks at the same rate as waypoint_nav, so its overrides win during
+# obstacle events.
 #
-# Publishers:  'set_motor_speeds_safe'
+# Only active in the mission launch (not teleop).
+#
+# Publishers:  'set_motor_speeds'
 # Subscribers: 'obstacle_detected', 'set_motor_speeds'
 
 STOP_DURATION_S = 2.0         # seconds to hold full stop before turning
 TURN_LEFT_SPEED = 0.2         # gentle right turn: left forward, right reverse
 TURN_RIGHT_SPEED = -0.2
-TICK_PERIOD_S = 0.1           # 10 Hz arbitration loop
+TICK_PERIOD_S = 0.1           # 10 Hz override loop
 
 # Finite-state machine states
-STATE_CLEAR = 'clear'   # passthrough from waypoint_nav
-STATE_STOP = 'stop'     # holding (0.0, 0.0) for STOP_DURATION_S
-STATE_TURN = 'turn'     # gentle right turn until obstacle clears
+STATE_CLEAR = 'clear'   # no override, waypoint_nav drives the motors
+STATE_STOP = 'stop'     # publishing (0.0, 0.0) for STOP_DURATION_S
+STATE_TURN = 'turn'     # publishing gentle right turn until obstacle clears
 
 
 class ObstacleAvoidance(Node):
@@ -29,8 +35,8 @@ class ObstacleAvoidance(Node):
         self.state = STATE_CLEAR
         self.stop_started_at = None
         self.obstacle_present = False
-        # Latest command received from waypoint_nav; default to stopped
-        # so we never forward stale or uninitialized data.
+        # Latest command observed on 'set_motor_speeds' (whoever published it).
+        # Cached for logging/debugging; not used to drive output.
         self.latest_nav_cmd = [0.0, 0.0]
 
         self.obstacle_sub = self.create_subscription(
@@ -39,12 +45,12 @@ class ObstacleAvoidance(Node):
         self.nav_sub = self.create_subscription(
             Float32MultiArray, 'set_motor_speeds', self.nav_callback, 10)
 
-        self.safe_pub = self.create_publisher(
-            Float32MultiArray, 'set_motor_speeds_safe', 10)
+        self.cmd_pub = self.create_publisher(
+            Float32MultiArray, 'set_motor_speeds', 10)
 
         self.timer = self.create_timer(TICK_PERIOD_S, self.tick)
 
-        self.get_logger().info('ObstacleAvoidance started in passthrough mode.')
+        self.get_logger().info('ObstacleAvoidance started — monitoring for obstacles.')
 
     # Track the most recent obstacle reading and kick off the stop/turn
     # sequence on the rising edge while we are otherwise clear.
@@ -56,17 +62,20 @@ class ObstacleAvoidance(Node):
             self.get_logger().info('Obstacle detected — stopping for '
                                    f'{STOP_DURATION_S:.1f}s.')
 
-    # Cache the latest waypoint_nav command for passthrough.
+    # Observe 'set_motor_speeds' traffic. Note: this also receives our own
+    # override publishes; harmless since we don't act on latest_nav_cmd.
     def nav_callback(self, msg: Float32MultiArray):
         if len(msg.data) >= 2:
             self.latest_nav_cmd = [float(msg.data[0]), float(msg.data[1])]
 
-    # Arbitration loop: publishes the safe command every tick based on
-    # the current state machine state.
+    # Override loop: publishes overriding commands on 'set_motor_speeds'
+    # during STOP and TURN; stays silent during CLEAR so waypoint_nav's
+    # commands reach motor_controller (last-write-wins on the shared topic).
     def tick(self):
         if self.state == STATE_CLEAR:
-            left, right = self.latest_nav_cmd
-        elif self.state == STATE_STOP:
+            return
+
+        if self.state == STATE_STOP:
             left, right = 0.0, 0.0
             if time.monotonic() - self.stop_started_at >= STOP_DURATION_S:
                 self.state = STATE_TURN
@@ -77,17 +86,16 @@ class ObstacleAvoidance(Node):
             if not self.obstacle_present:
                 self.state = STATE_CLEAR
                 self.stop_started_at = None
-                self.get_logger().info('Obstacle cleared — resuming '
-                                       'waypoint navigation.')
-                left, right = self.latest_nav_cmd
-            else:
-                left, right = TURN_LEFT_SPEED, TURN_RIGHT_SPEED
+                self.get_logger().info('Obstacle cleared — yielding to '
+                                       'waypoint_nav.')
+                return
+            left, right = TURN_LEFT_SPEED, TURN_RIGHT_SPEED
         else:
-            left, right = 0.0, 0.0
+            return
 
         out = Float32MultiArray()
         out.data = [left, right]
-        self.safe_pub.publish(out)
+        self.cmd_pub.publish(out)
 
 
 def main(args=None):

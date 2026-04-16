@@ -8,5 +8,6 @@ def generate_launch_description():
         Node(package='sensors', executable='gps_pub',         output='screen'),
         Node(package='sensors', executable='water_sensor',    output='screen'),
         Node(package='sensors', executable='camera_pub',      output='screen'),
+        Node(package='sensors', executable='object_detector', output='screen'),
 
     ])

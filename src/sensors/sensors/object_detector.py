@@ -1,21 +1,21 @@
 import rclpy
 from rclpy.node import Node
 from ultralytics import YOLO
-from std_msgs.msg import String, Float64MultiArray, Bool
+from std_msgs.msg import Float64MultiArray, Bool
 import cv2
 import time
 
 # This node handles real-time object detection using the YOLO model
-# It captures video from the camera, processes each frame using the custom YOLO model, and publishes a string with info about the detected objects
-# Publishers: 'object_detections'
+# It captures video from the camera, processes each frame using the pretrained YOLOv8n COCO model,
+# and publishes a Bool flag indicating whether any detected object lies in the middle third of the frame
+# Publishers: 'obstacle_detected'
 # Subscribers: 'centroid', 'emergency_stop'
 class ObjectDetector(Node):
     def __init__(self):
         super().__init__('object_detector')
 
-        # Loads the YOLO weights from the specified path (on the Raspberry Pi)
-        # Using YOLO12, with version 12 of our custom weights
-        self.model = YOLO('/home/meadams/ros2_ws/src/sensors/resource/bestv12.pt')
+        # Loads the pretrained YOLOv8n model trained on COCO
+        self.model = YOLO('yolov8n.pt')
         # Opens the webcam footage at index 0 (for the Pi) 
         self.cap = cv2.VideoCapture(0)
         # If webcame cannot open the node is shut down
@@ -36,21 +36,22 @@ class ObjectDetector(Node):
         # Set to True to save the annotated video
         self.save_annotated = True
 
+        # Cache the frame dimensions for the middle-third obstacle check
+        self.frame_width = int(self.cap.get(3))
+        self.frame_height = int(self.cap.get(4))
+
         # If video recording is enabled, set up the video writer
         # The video will be saved in the current directory labeled with the current timestamp as an .mp4 file (ignored by .gitignore)
         if self.save_video:
-            frame_width = int(self.cap.get(3))
-            frame_height = int(self.cap.get(4))
-
             timestamp = time.strftime("%Y%m%d_%H%M%S")
             self.video_filename = f"detection_{timestamp}.mp4"
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
             fps = 5
-            self.out = cv2.VideoWriter(self.video_filename, fourcc, fps, (frame_width, frame_height))
-        
-        # Publisher for detected objects
-        # Message type: String
-        self.detection_pub = self.create_publisher(String, 'object_detections', 10)
+            self.out = cv2.VideoWriter(self.video_filename, fourcc, fps, (self.frame_width, self.frame_height))
+
+        # Publisher signaling whether an obstacle is in the middle third of the frame
+        # Message type: Bool
+        self.obstacle_pub = self.create_publisher(Bool, 'obstacle_detected', 10)
         
         # Timer to process the image every 0.1 seconds (artificially 10 FPS)
         timer_period = 0.1  # seconds
@@ -81,31 +82,26 @@ class ObjectDetector(Node):
             # Passes the frame to the YOLO model for processing and returns detected objects
             results = self.model(frame, verbose=False)
 
-            # Initializes the output msg String for detected objects
-            publishString = String()
-            objectStrings = ""
+            # Middle third of the frame horizontally — an obstacle here is in the boat's path
+            left_bound = self.frame_width / 3
+            right_bound = 2 * self.frame_width / 3
 
-            # Loop over detected objects
+            # Check whether any detection with confidence > 0.5 has its bounding box center
+            # inside the middle third of the frame
+            obstacle_detected = False
             for box in results[0].boxes:
-                # Class label, confidence, and bounding box coordinates
-                class_label = self.model.names[int(box.cls[0])]
-                raw_conf = box.conf[0]
-                conf = 100 * round(raw_conf.item(), 2)
-                x1, y1, x2, y2 = map(int, box.xyxy[0])
-                # Format object information into a single string
-                objectString = f"{class_label}, {conf}, {x1}, {y1}, {x2}, {y2}"
-                # Append the object string to the output string
-                # Each object is separated by a $ symbol
-                if objectStrings:
-                    objectStrings += " $ " + objectString
-                else:
-                    objectStrings = objectString
+                if box.conf[0].item() <= 0.5:
+                    continue
+                x1, _, x2, _ = map(float, box.xyxy[0])
+                cx = (x1 + x2) / 2
+                if left_bound < cx < right_bound:
+                    obstacle_detected = True
+                    break
 
-            # Publish the object strings to the 'object_detections' topic
-            # If there are no detected objects, publish an empty string
-            if objectStrings != "":
-                publishString.data = objectStrings
-                self.detection_pub.publish(publishString)
+            # Publish the obstacle flag
+            obstacle_msg = Bool()
+            obstacle_msg.data = obstacle_detected
+            self.obstacle_pub.publish(obstacle_msg)
 
 
             if self.save_video or self.show_video:

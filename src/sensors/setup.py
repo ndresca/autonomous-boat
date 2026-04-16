@@ -26,6 +26,7 @@ setup(
             'kalman            = sensors.kalman_state:main',
             'gps_pub           = sensors.fix_publisher:main',
             'camera_pub        = sensors.camera_publisher:main',
+            'object_detector   = sensors.object_detector:main',
         ],
     },
 )

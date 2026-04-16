@@ -35,4 +35,13 @@ def generate_launch_description():
             output='screen'
         ),
 
+        # ── Obstacle avoidance arbiter ────────────────────────
+        # Gates waypoint_nav commands based on 'obstacle_detected'
+        # and republishes on 'set_motor_speeds_safe'.
+        Node(
+            package='navigation',
+            executable='obstacle_avoidance',
+            output='screen'
+        ),
+
     ])

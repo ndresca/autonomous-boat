@@ -10,7 +10,7 @@ import time
 # Scaled speed control values from either teleoperation or autonomous control are sent as two
 # signed bytes (int8, -100..100). The ESP32 maps these to ESC PWM microseconds (1000..2000).
 # Publishers:
-# Subscribers: 'set_motor_speeds', 'emergency_stop'
+# Subscribers: 'set_motor_speeds_safe', 'emergency_stop'
 class MotorControllerNode(Node):
     def __init__(self):
         super().__init__('motor_controller')
@@ -21,10 +21,11 @@ class MotorControllerNode(Node):
         self.ser = None
         self.open_serial()
 
-        # Subscription to the 'set_motor_speeds' topic
+        # Subscription to the 'set_motor_speeds_safe' topic published by
+        # the obstacle_avoidance arbiter (which gates waypoint_nav output).
         self.speed_subscription = self.create_subscription(
             Float32MultiArray,
-            'set_motor_speeds',
+            'set_motor_speeds_safe',
             self.set_motor_speeds,
             10)
 
@@ -58,7 +59,7 @@ class MotorControllerNode(Node):
             scaled = -100
         return scaled
 
-    # Processes the incoming speed command from the 'set_motor_speeds' topic
+    # Processes the incoming speed command from the 'set_motor_speeds_safe' topic
     # Input: [Float32MultiArray] msg containing the speed values for left and right motors
     def set_motor_speeds(self, msg):
         if len(msg.data) < 2:

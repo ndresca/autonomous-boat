@@ -56,6 +56,12 @@ class ObjectDetector(Node):
         # Message type: CompressedImage — replaces the standalone camera_publisher node
         self.image_pub = self.create_publisher(CompressedImage, 'camera/image/compressed', 10)
         
+        # Frame skip counter: run YOLO every 3rd frame (~3 Hz inference),
+        # republish the last annotated frame on skipped frames (~10 Hz stream).
+        self.frame_counter = 0
+        self.skip_interval = 3
+        self.last_annotated_frame = None
+
         # Timer to process the image every 0.1 seconds (artificially 10 FPS)
         timer_period = 0.1  # seconds
         self.timer = self.create_timer(timer_period, self.process_image)
@@ -69,15 +75,35 @@ class ObjectDetector(Node):
             10
         )
 
+    # Publishes an annotated frame as a JPEG-compressed image
+    def publish_frame(self, frame):
+        encoded, jpeg = cv2.imencode('.jpg', frame)
+        if encoded:
+            image_msg = CompressedImage()
+            image_msg.header.stamp = self.get_clock().now().to_msg()
+            image_msg.header.frame_id = 'camera'
+            image_msg.format = 'jpeg'
+            image_msg.data = jpeg.tobytes()
+            self.image_pub.publish(image_msg)
+
     # Processes the image from the camera
     def process_image(self):
         # Read a frame from the camera
         ret, frame = self.cap.read()
         # If the frame is read successfully, process it
         if ret:
-            # Flip the frame vertically (raw image is update down due to camera orientation)
+            # Flip the frame vertically (raw image is upside down due to camera orientation)
             frame = cv2.flip(frame, 0)
-            # Passes the frame to the YOLO model for processing and returns detected objects
+
+            self.frame_counter += 1
+
+            # On skipped frames, republish the last annotated frame to keep the stream at ~10 Hz
+            if self.frame_counter % self.skip_interval != 0:
+                if self.last_annotated_frame is not None:
+                    self.publish_frame(self.last_annotated_frame)
+                return
+
+            # Run YOLO inference (~3 Hz)
             results = self.model(frame, verbose=False)
 
             # Middle third of the frame horizontally — an obstacle here is in the boat's path
@@ -101,28 +127,18 @@ class ObjectDetector(Node):
             obstacle_msg.data = obstacle_detected
             self.obstacle_pub.publish(obstacle_msg)
 
-
             # Annotate the frame with bounding boxes and labels
             annotated_frame = results[0].plot()
+            self.last_annotated_frame = annotated_frame
 
-            # Publish the annotated frame as a JPEG-compressed image so the
-            # MJPEG stream shows the detection overlay
-            encoded, jpeg = cv2.imencode('.jpg', annotated_frame)
-            if encoded:
-                image_msg = CompressedImage()
-                image_msg.header.stamp = self.get_clock().now().to_msg()
-                image_msg.header.frame_id = 'camera'
-                image_msg.format = 'jpeg'
-                image_msg.data = jpeg.tobytes()
-                self.image_pub.publish(image_msg)
+            # Publish the annotated frame
+            self.publish_frame(annotated_frame)
 
             # If video recording is enabled, write the frame to the video file
             if self.save_video:
                 if self.save_annotated:
-                    # Save the annotated frame to the video file
                     self.out.write(annotated_frame)
                 else:
-                    # Save the raw frame to the video file
                     self.out.write(frame)
 
     # Destroy the node when the emergency stop is triggered
